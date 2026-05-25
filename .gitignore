@@ -1,0 +1,8 @@
+raziel
+raziel-*
+*.db
+*.db-wal
+*.db-shm
+.raziel/
+.env
+.env.*

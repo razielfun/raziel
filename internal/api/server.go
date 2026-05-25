@@ -1,0 +1,85 @@
+package api
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"go.uber.org/zap"
+
+	"github.com/raziel-ai/raziel/internal/auth"
+	"github.com/raziel-ai/raziel/internal/config"
+	"github.com/raziel-ai/raziel/internal/db"
+	"github.com/raziel-ai/raziel/internal/provider"
+	"github.com/raziel-ai/raziel/internal/queue"
+	"github.com/raziel-ai/raziel/internal/storage"
+)
+
+type Server struct {
+	cfg       config.Config
+	db        *db.DB
+	store     storage.ArtifactStore
+	queue     queue.Queue
+	providers *provider.Registry
+	log       *zap.Logger
+	router    chi.Router
+}
+
+func New(cfg config.Config, database *db.DB, store storage.ArtifactStore, q queue.Queue, providers *provider.Registry, log *zap.Logger) *Server {
+	s := &Server{
+		cfg:       cfg,
+		db:        database,
+		store:     store,
+		queue:     q,
+		providers: providers,
+		log:       log,
+	}
+	s.router = s.buildRouter()
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.router.ServeHTTP(w, r)
+}
+
+func (s *Server) Addr() string {
+	return fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+}
+
+func (s *Server) buildRouter() chi.Router {
+	r := chi.NewRouter()
+
+	r.Use(middleware.RealIP)
+	r.Use(middleware.RequestID)
+	r.Use(zapLogger(s.log))
+	r.Use(middleware.Recoverer)
+	r.Use(corsMiddleware)
+
+	// Public
+	r.Get("/health", s.handleHealth)
+
+	// Authenticated
+	authMW := auth.SingleTenantMiddleware(s.cfg.APISecret)
+	r.Group(func(r chi.Router) {
+		r.Use(authMW)
+
+		r.Get("/me", s.handleMe)
+
+		r.Route("/v0/deployments", func(r chi.Router) {
+			r.Get("/", s.handleListDeployments)
+			r.Post("/", s.handleCreateDeployment)
+
+			r.Route("/{deploymentID}", func(r chi.Router) {
+				r.Get("/", s.handleGetDeployment)
+				r.Put("/", s.handleRedeployDeployment)
+				r.Delete("/", auth.RequireScope(auth.ScopeDelete)(http.HandlerFunc(s.handleDestroyDeployment)).ServeHTTP)
+				r.Get("/logs", s.handleGetLogs)
+				r.Post("/domains", s.handleAddDomain)
+				r.Delete("/domains/{hostname}", s.handleRemoveDomain)
+			})
+		})
+	})
+
+	return r
+}
