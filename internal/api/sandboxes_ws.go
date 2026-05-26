@@ -96,22 +96,22 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
-			// Text frames = control messages (resize)
+			// Text frames: try JSON control (resize), otherwise treat as stdin
 			if msgType == websocket.MessageText {
 				var ctrl struct {
 					Type string `json:"type"`
 					Cols uint16 `json:"cols"`
 					Rows uint16 `json:"rows"`
 				}
-				if json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" && ctrl.Cols > 0 && ctrl.Rows > 0 {
+				if len(msg) > 0 && msg[0] == '{' && json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" && ctrl.Cols > 0 && ctrl.Rows > 0 {
 					select {
 					case resizeCh <- [2]uint16{ctrl.Cols, ctrl.Rows}:
 					default:
 					}
+					continue
 				}
-				continue
 			}
-			// Binary frames = stdin
+			// Binary frames and non-JSON text frames = stdin
 			pw.Write(msg) //nolint:errcheck
 		}
 	}()
