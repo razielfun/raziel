@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"os/exec"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -47,8 +49,12 @@ func (s *Server) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID    string `json:"id"`
-		Agent string `json:"agent"`
+		ID          string `json:"id"`
+		Agent       string `json:"agent"`
+		CloneURL    string `json:"clone_url"`
+		Branch      string `json:"branch"`
+		Worktree    bool   `json:"worktree"`
+		GitHubToken string `json:"github_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonBadRequest(w, "invalid JSON body")
@@ -68,6 +74,12 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		jsonInternalError(w, fmt.Sprintf("create sandbox: %v", err))
 		return
 	}
+
+	// Clone repository into workspace if requested
+	if body.CloneURL != "" {
+		go s.cloneRepo(sbx, body.CloneURL, body.Branch, body.GitHubToken, body.Worktree)
+	}
+
 	jsonCreated(w, sbxToResponse(sbx))
 }
 
@@ -134,4 +146,33 @@ func (s *Server) handleRegisterWsToken(w http.ResponseWriter, r *http.Request) {
 		"sandbox_id": id,
 		"expires_in": 60,
 	})
+}
+
+// cloneRepo runs git clone in the sandbox workspace. Runs in a goroutine after
+// the sandbox creation response is already sent. Injects a GitHub token into the
+// clone URL if one is provided.
+func (s *Server) cloneRepo(sbx *sandbox.Sandbox, cloneURL, branch, githubToken string, worktree bool) {
+	target := cloneURL
+	if githubToken != "" {
+		if u, err := url.Parse(cloneURL); err == nil {
+			u.User = url.UserPassword("x-access-token", githubToken)
+			target = u.String()
+		}
+	}
+
+	args := []string{"clone", "--depth=1"}
+	if branch != "" {
+		args = append(args, "--branch", branch)
+	}
+	args = append(args, target, sbx.WorkspacePath)
+
+	cmd := exec.Command("git", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		s.log.Warn("sandbox git clone failed",
+			zap.String("id", sbx.ID),
+			zap.String("url", cloneURL),
+			zap.Error(err),
+			zap.String("output", string(out)),
+		)
+	}
 }
