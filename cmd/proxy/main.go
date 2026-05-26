@@ -1,4 +1,4 @@
-// Raziel connect proxy — routes *.connect.razi.lol to agent VPS private IPs.
+// Raziel connect proxy — routes *.razi.lol to agent VPS private IPs.
 //
 // Each incoming request has a Host header like "my-server.connect.razi.lol".
 // The proxy strips the base domain, looks up the server name in a routing table
@@ -32,7 +32,7 @@ import (
 func main() {
 	appURL := mustEnv("APP_URL")
 	proxySecret := mustEnv("PROXY_SECRET")
-	baseDomain := envOr("BASE_DOMAIN", "connect.razi.lol")
+	baseDomain := envOr("BASE_DOMAIN", "razi.lol")
 	listenAddr := envOr("LISTEN_ADDR", ":80")
 	agentPort := envOr("AGENT_PORT", "8000")
 

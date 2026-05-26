@@ -30,7 +30,7 @@ mkdir -p /etc/raziel-proxy
 cat > /etc/raziel-proxy/env <<EOF
 APP_URL=${APP_URL}
 PROXY_SECRET=${PROXY_SECRET}
-BASE_DOMAIN=connect.razi.lol
+BASE_DOMAIN=razi.lol
 LISTEN_ADDR=:80
 AGENT_PORT=8000
 EOF
@@ -45,4 +45,4 @@ ssh "root@${PROXY_HOST}" "systemctl status raziel-proxy --no-pager"
 
 echo ""
 echo "Done. Proxy running on ${PROXY_HOST}:80"
-echo "Ensure Cloudflare *.connect.razi.lol → ${PROXY_HOST}"
+echo "Ensure Cloudflare *.razi.lol → ${PROXY_HOST}"
