@@ -1,8 +1,15 @@
-raziel
-raziel-*
+/raziel
+/raziel-*
 *.db
 *.db-wal
 *.db-shm
 .raziel/
 .env
 .env.*
+.claude-flow/
+.swarm/
+agentdb.rvf
+agentdb.rvf.lock
+ruvector.db
+*.output
+
