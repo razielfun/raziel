@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -55,10 +56,10 @@ type Provider interface {
 	// Run executes a command inside the sandbox and streams output via the
 	// provided callbacks. Returns when the command exits.
 	Run(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string, stdout, stderr func(string)) (int, error)
-	// RunTTY executes a command with a full PTY attached so interactive programs
-	// (editors, REPLs, etc.) work correctly. stdin/stdout/stderr are wired
-	// directly to the caller's terminal.
-	RunTTY(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string) (int, error)
+	// RunTTY executes a command with a full PTY attached, wiring stdio to the
+	// provided reader/writer (e.g. a WebSocket pipe). Resize events are sent on
+	// the resize channel as [cols, rows] pairs.
+	RunTTY(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string, stdin io.Reader, stdout io.Writer, resize <-chan [2]uint16) (int, error)
 	Stop(ctx context.Context, id string) error
 	Destroy(ctx context.Context, id string) error
 	Get(id string) (*Sandbox, error)

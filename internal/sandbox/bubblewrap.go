@@ -9,9 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -110,7 +108,7 @@ func (p *BubblewrapProvider) Run(ctx context.Context, sbx *Sandbox, cmd []string
 	return 0, nil
 }
 
-func (p *BubblewrapProvider) RunTTY(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string) (int, error) {
+func (p *BubblewrapProvider) RunTTY(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string, stdin io.Reader, stdout io.Writer, resize <-chan [2]uint16) (int, error) {
 	if len(cmd) == 0 {
 		return 0, fmt.Errorf("sandbox: empty command")
 	}
@@ -124,7 +122,7 @@ func (p *BubblewrapProvider) RunTTY(ctx context.Context, sbx *Sandbox, cmd []str
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"RAZIEL_SANDBOX=" + sbx.ID,
 		"RAZIEL_WORKSPACE=" + sbx.WorkspacePath,
-		"TERM=" + os.Getenv("TERM"),
+		"TERM=xterm-256color",
 	}
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
@@ -136,25 +134,15 @@ func (p *BubblewrapProvider) RunTTY(ctx context.Context, sbx *Sandbox, cmd []str
 	}
 	defer ptmx.Close()
 
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
+	// Handle resize events from the caller
 	go func() {
-		for range ch {
-			pty.InheritSize(os.Stdin, ptmx) //nolint:errcheck
+		for sz := range resize {
+			pty.Setsize(ptmx, &pty.Winsize{Cols: sz[0], Rows: sz[1]}) //nolint:errcheck
 		}
 	}()
-	ch <- syscall.SIGWINCH
 
-	oldState, err := setRawMode(os.Stdin)
-	if err == nil {
-		defer restoreMode(os.Stdin, oldState)
-	}
-
-	go io.Copy(ptmx, os.Stdin) //nolint:errcheck
-	io.Copy(os.Stdout, ptmx)   //nolint:errcheck
-
-	signal.Stop(ch)
-	close(ch)
+	go io.Copy(ptmx, stdin)   //nolint:errcheck
+	io.Copy(stdout, ptmx)     //nolint:errcheck
 
 	if err := c.Wait(); err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {

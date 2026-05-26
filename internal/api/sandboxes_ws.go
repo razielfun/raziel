@@ -16,9 +16,9 @@ import (
 // handleSandboxWs upgrades to WebSocket and attaches a PTY to the sandbox.
 // The caller must provide a short-lived token issued by handleRegisterWsToken.
 //
-// Protocol (text frames):
-//   - Client → Server: raw stdin bytes OR {"type":"resize","cols":N,"rows":N}
-//   - Server → Client: raw stdout/stderr bytes
+// Protocol (binary frames):
+//   - Client → Server: raw stdin bytes OR {"type":"resize","cols":N,"rows":N} (text frame)
+//   - Server → Client: raw stdout/stderr bytes (binary frames)
 func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sandboxID")
 	token := r.URL.Query().Get("token")
@@ -49,7 +49,7 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // CORS handled by middleware
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		s.log.Warn("ws accept", zap.Error(err))
@@ -57,52 +57,67 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow() //nolint:errcheck
 
-	ctx := conn.CloseRead(context.Background())
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 
+	// stdin pipe: WS → PTY
 	pr, pw := io.Pipe()
 
-	// Forward PTY output to WebSocket
+	// stdout pipe: PTY → WS
+	outPr, outPw := io.Pipe()
+
+	// resize channel
+	resizeCh := make(chan [2]uint16, 4)
+
+	// Forward PTY output to WebSocket (binary frames)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := pr.Read(buf)
+			n, err := outPr.Read(buf)
 			if n > 0 {
 				if werr := conn.Write(ctx, websocket.MessageBinary, buf[:n]); werr != nil {
+					cancel()
 					return
 				}
 			}
 			if err != nil {
+				cancel()
 				return
 			}
 		}
 	}()
 
-	// Forward WebSocket messages to PTY stdin or handle resize
+	// Forward WebSocket messages → PTY stdin or resize channel
 	go func() {
+		defer pw.Close()
+		defer close(resizeCh)
 		for {
-			_, msg, err := conn.Read(ctx)
+			msgType, msg, err := conn.Read(ctx)
 			if err != nil {
-				pw.Close() //nolint:errcheck
 				return
 			}
-			// Check if it's a resize control frame
-			if len(msg) > 0 && msg[0] == '{' {
+			// Text frames = control messages (resize)
+			if msgType == websocket.MessageText {
 				var ctrl struct {
 					Type string `json:"type"`
-					Cols int    `json:"cols"`
-					Rows int    `json:"rows"`
+					Cols uint16 `json:"cols"`
+					Rows uint16 `json:"rows"`
 				}
-				if json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" {
-					// Resize is handled inside RunTTY via SIGWINCH; best-effort ignore here
-					continue
+				if json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" && ctrl.Cols > 0 && ctrl.Rows > 0 {
+					select {
+					case resizeCh <- [2]uint16{ctrl.Cols, ctrl.Rows}:
+					default:
+					}
 				}
+				continue
 			}
+			// Binary frames = stdin
 			pw.Write(msg) //nolint:errcheck
 		}
 	}()
 
-	// Run /bin/bash inside the sandbox with a PTY
-	exitCode, err := s.sandboxProvider.RunTTY(ctx, sbx, []string{"/bin/bash"}, nil)
+	exitCode, err := s.sandboxProvider.RunTTY(ctx, sbx, []string{"/bin/bash"}, nil, pr, outPw, resizeCh)
+	outPw.Close()
 	if err != nil {
 		s.log.Warn("sandbox ws: RunTTY", zap.String("id", id), zap.Error(err))
 	}

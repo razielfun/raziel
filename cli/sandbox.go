@@ -115,8 +115,10 @@ func runSandboxRun(_ *cobra.Command, args []string) error {
 
 	var code int
 	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
-		// Interactive terminal — allocate a PTY so editors/REPLs work correctly
-		code, err = p.RunTTY(context.Background(), sbx, cmd, nil)
+		// Interactive terminal — allocate a PTY; resize channel closed immediately (no WS)
+		resizeCh := make(chan [2]uint16)
+		close(resizeCh)
+		code, err = p.RunTTY(context.Background(), sbx, cmd, nil, os.Stdin, os.Stdout, resizeCh)
 	} else {
 		// Non-interactive (piped) — stream lines via callbacks
 		code, err = p.Run(context.Background(), sbx, cmd, nil,
