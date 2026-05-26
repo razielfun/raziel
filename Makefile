@@ -1,10 +1,13 @@
-.PHONY: build test lint clean run
+.PHONY: build build-proxy test lint clean run
 
 BINARY = raziel
 PKG    = ./cmd/raziel
 
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BINARY) $(PKG)
+
+build-proxy:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/raziel-proxy-linux-amd64 ./cmd/proxy
 
 build-all:
 	CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o $(BINARY)-linux-amd64 $(PKG)

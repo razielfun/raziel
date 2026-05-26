@@ -1,0 +1,14 @@
+[Unit]
+Description=Raziel Connect Proxy
+After=network.target
+
+[Service]
+EnvironmentFile=/etc/raziel-proxy/env
+ExecStart=/usr/local/bin/raziel-proxy
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
