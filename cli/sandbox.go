@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/raziel-ai/raziel/internal/idgen"
@@ -112,10 +113,17 @@ func runSandboxRun(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("sandbox %q: %w", id, err)
 	}
 
-	code, err := p.Run(context.Background(), sbx, cmd, nil,
-		func(line string) { fmt.Fprintln(os.Stdout, line) },
-		func(line string) { fmt.Fprintln(os.Stderr, line) },
-	)
+	var code int
+	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		// Interactive terminal — allocate a PTY so editors/REPLs work correctly
+		code, err = p.RunTTY(context.Background(), sbx, cmd, nil)
+	} else {
+		// Non-interactive (piped) — stream lines via callbacks
+		code, err = p.Run(context.Background(), sbx, cmd, nil,
+			func(line string) { fmt.Fprintln(os.Stdout, line) },
+			func(line string) { fmt.Fprintln(os.Stderr, line) },
+		)
+	}
 	if err != nil {
 		return err
 	}

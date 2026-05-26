@@ -18,6 +18,7 @@ import (
 	"github.com/raziel-ai/raziel/internal/provider"
 	"github.com/raziel-ai/raziel/internal/provider/fly"
 	"github.com/raziel-ai/raziel/internal/queue"
+	"github.com/raziel-ai/raziel/internal/sandbox"
 	"github.com/raziel-ai/raziel/internal/storage"
 	"github.com/raziel-ai/raziel/internal/worker"
 )
@@ -61,7 +62,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		log.Warn("FLY_API_TOKEN not set — no cloud provider available")
 	}
 
-	server := api.New(cfg, database, store, q, registry, log)
+	sbxStore, err := sandbox.DefaultStore()
+	if err != nil {
+		return fmt.Errorf("sandbox store: %w", err)
+	}
+	sbxProvider := sandbox.NewProvider(sbxStore)
+
+	server := api.New(cfg, database, store, q, registry, sbxProvider, log)
 	w := worker.New(q, database, store, registry, log, cfg.WorkerConcurrency)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

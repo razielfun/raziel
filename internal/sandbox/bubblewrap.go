@@ -6,10 +6,15 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // BubblewrapProvider implements the sandbox Provider for Linux using bwrap.
@@ -101,6 +106,61 @@ func (p *BubblewrapProvider) Run(ctx context.Context, sbx *Sandbox, cmd []string
 			return exit.ExitCode(), nil
 		}
 		return 1, err
+	}
+	return 0, nil
+}
+
+func (p *BubblewrapProvider) RunTTY(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string) (int, error) {
+	if len(cmd) == 0 {
+		return 0, fmt.Errorf("sandbox: empty command")
+	}
+
+	args := bwrapArgs(sbx, cmd)
+	c := exec.CommandContext(ctx, "bwrap", args...)
+	c.Dir = sbx.WorkspacePath
+	c.Env = []string{
+		"HOME=" + sbx.WorkspacePath,
+		"TMPDIR=/tmp",
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"RAZIEL_SANDBOX=" + sbx.ID,
+		"RAZIEL_WORKSPACE=" + sbx.WorkspacePath,
+		"TERM=" + os.Getenv("TERM"),
+	}
+	for k, v := range env {
+		c.Env = append(c.Env, k+"="+v)
+	}
+
+	ptmx, err := pty.Start(c)
+	if err != nil {
+		return 1, fmt.Errorf("sandbox: pty start: %w", err)
+	}
+	defer ptmx.Close()
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+	go func() {
+		for range ch {
+			pty.InheritSize(os.Stdin, ptmx) //nolint:errcheck
+		}
+	}()
+	ch <- syscall.SIGWINCH
+
+	oldState, err := setRawMode(os.Stdin)
+	if err == nil {
+		defer restoreMode(os.Stdin, oldState)
+	}
+
+	go io.Copy(ptmx, os.Stdin) //nolint:errcheck
+	io.Copy(os.Stdout, ptmx)   //nolint:errcheck
+
+	signal.Stop(ch)
+	close(ch)
+
+	if err := c.Wait(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode(), nil
+		}
+		return 0, nil
 	}
 	return 0, nil
 }

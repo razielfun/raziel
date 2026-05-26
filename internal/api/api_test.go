@@ -16,6 +16,7 @@ import (
 	"github.com/raziel-ai/raziel/internal/provider"
 	"github.com/raziel-ai/raziel/internal/provider/mock"
 	"github.com/raziel-ai/raziel/internal/queue"
+	"github.com/raziel-ai/raziel/internal/sandbox"
 	"github.com/raziel-ai/raziel/internal/storage"
 )
 
@@ -45,8 +46,12 @@ func newTestServer(t *testing.T) *httptest.Server {
 		StoragePath:          tmpStore,
 	}
 
+	sbxStore, err := sandbox.NewStore(t.TempDir())
+	require.NoError(t, err)
+	sbxProvider := sandbox.NewProvider(sbxStore)
+
 	log := zap.NewNop()
-	srv := api.New(cfg, database, store, q, registry, log)
+	srv := api.New(cfg, database, store, q, registry, sbxProvider, log)
 	return httptest.NewServer(srv)
 }
 

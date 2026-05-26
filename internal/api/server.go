@@ -13,27 +13,32 @@ import (
 	"github.com/raziel-ai/raziel/internal/db"
 	"github.com/raziel-ai/raziel/internal/provider"
 	"github.com/raziel-ai/raziel/internal/queue"
+	"github.com/raziel-ai/raziel/internal/sandbox"
 	"github.com/raziel-ai/raziel/internal/storage"
 )
 
 type Server struct {
-	cfg       config.Config
-	db        *db.DB
-	store     storage.ArtifactStore
-	queue     queue.Queue
-	providers *provider.Registry
-	log       *zap.Logger
-	router    chi.Router
+	cfg             config.Config
+	db              *db.DB
+	store           storage.ArtifactStore
+	queue           queue.Queue
+	providers       *provider.Registry
+	sandboxProvider sandbox.Provider
+	wsTokens        *wsTokenStore
+	log             *zap.Logger
+	router          chi.Router
 }
 
-func New(cfg config.Config, database *db.DB, store storage.ArtifactStore, q queue.Queue, providers *provider.Registry, log *zap.Logger) *Server {
+func New(cfg config.Config, database *db.DB, store storage.ArtifactStore, q queue.Queue, providers *provider.Registry, sbxProvider sandbox.Provider, log *zap.Logger) *Server {
 	s := &Server{
-		cfg:       cfg,
-		db:        database,
-		store:     store,
-		queue:     q,
-		providers: providers,
-		log:       log,
+		cfg:             cfg,
+		db:              database,
+		store:           store,
+		queue:           q,
+		providers:       providers,
+		sandboxProvider: sbxProvider,
+		wsTokens:        newWsTokenStore(),
+		log:             log,
 	}
 	s.router = s.buildRouter()
 	return s
@@ -77,6 +82,19 @@ func (s *Server) buildRouter() chi.Router {
 				r.Get("/logs", s.handleGetLogs)
 				r.Post("/domains", s.handleAddDomain)
 				r.Delete("/domains/{hostname}", s.handleRemoveDomain)
+			})
+		})
+
+		r.Route("/v0/sandboxes", func(r chi.Router) {
+			r.Get("/", s.handleListSandboxes)
+			r.Post("/", s.handleCreateSandbox)
+
+			r.Route("/{sandboxID}", func(r chi.Router) {
+				r.Get("/", s.handleGetSandbox)
+				r.Post("/stop", s.handleStopSandbox)
+				r.Delete("/", s.handleDestroySandbox)
+				r.Post("/ws-tokens", s.handleRegisterWsToken)
+				r.Get("/ws", s.handleSandboxWs)
 			})
 		})
 	})

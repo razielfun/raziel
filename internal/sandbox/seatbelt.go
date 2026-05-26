@@ -6,11 +6,17 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // SeatbeltProvider implements the sandbox Provider for macOS using
@@ -117,6 +123,78 @@ func (p *SeatbeltProvider) Run(ctx context.Context, sbx *Sandbox, cmd []string, 
 		return 1, err
 	}
 	return 0, nil
+}
+
+func (p *SeatbeltProvider) RunTTY(ctx context.Context, sbx *Sandbox, cmd []string, env map[string]string) (int, error) {
+	if len(cmd) == 0 {
+		return 0, fmt.Errorf("sandbox: empty command")
+	}
+
+	policy := generateSBPL(sbx)
+	args := append([]string{"-p", policy}, cmd...)
+	c := exec.CommandContext(ctx, "sandbox-exec", args...)
+	c.Dir = sbx.WorkspacePath
+
+	c.Env = os.Environ()
+	for k, v := range env {
+		c.Env = append(c.Env, k+"="+v)
+	}
+	c.Env = append(c.Env,
+		"RAZIEL_SANDBOX="+sbx.ID,
+		"RAZIEL_WORKSPACE="+sbx.WorkspacePath,
+		"TERM="+os.Getenv("TERM"),
+	)
+
+	ptmx, err := pty.Start(c)
+	if err != nil {
+		return 1, fmt.Errorf("sandbox: pty start: %w", err)
+	}
+	defer ptmx.Close()
+
+	// Resize PTY when terminal window changes
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+	go func() {
+		for range ch {
+			pty.InheritSize(os.Stdin, ptmx) //nolint:errcheck
+		}
+	}()
+	ch <- syscall.SIGWINCH // set initial size
+
+	// Put stdin into raw mode
+	oldState, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TIOCGETA)
+	if err == nil {
+		raw := *oldState
+		unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TIOCSETA, cfmakeraw(&raw)) //nolint:errcheck
+		defer unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TIOCSETA, oldState)  //nolint:errcheck
+	}
+
+	go io.Copy(ptmx, os.Stdin)  //nolint:errcheck
+	io.Copy(os.Stdout, ptmx)    //nolint:errcheck
+
+	signal.Stop(ch)
+	close(ch)
+
+	if err := c.Wait(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode(), nil
+		}
+		// EIO is normal when the PTY master closes after process exit
+		return 0, nil
+	}
+	return 0, nil
+}
+
+// cfmakeraw returns a termios with raw mode flags set.
+func cfmakeraw(t *unix.Termios) *unix.Termios {
+	t.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
+	t.Oflag &^= unix.OPOST
+	t.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
+	t.Cflag &^= unix.CSIZE | unix.PARENB
+	t.Cflag |= unix.CS8
+	t.Cc[unix.VMIN] = 1
+	t.Cc[unix.VTIME] = 0
+	return t
 }
 
 func (p *SeatbeltProvider) Stop(_ context.Context, id string) error {
