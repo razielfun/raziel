@@ -68,6 +68,8 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/health", s.handleHealth)
 	// Token-authenticated WebSocket endpoint (no Bearer header — token is in query param)
 	r.Get("/v0/sandboxes/{sandboxID}/ws", s.handleSandboxWs)
+	// Stats endpoint — auth required
+	r.With(auth.SingleTenantMiddleware(s.cfg.APISecret)).Get("/v0/stats", s.handleStats)
 
 	// Authenticated
 	authMW := auth.SingleTenantMiddleware(s.cfg.APISecret)
