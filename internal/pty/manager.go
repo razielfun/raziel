@@ -80,23 +80,18 @@ func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars ma
 	}
 	m.sessions[key] = s
 
-	// Remove from map when process exits, but keep scrollback accessible
-	// via the returned *Session pointer held by the caller.
-	go func() {
-		<-s.exitCh
-		m.mu.Lock()
-		if m.sessions[key] == s {
-			delete(m.sessions, key)
-		}
-		m.mu.Unlock()
-	}()
+	// Intentionally NOT deleted from the map on exit: the session is kept so its
+	// scrollback stays retrievable via GetScrollback after the process exits —
+	// e.g. a fast crash ("claude: command not found") whose error output the UI
+	// fetches only after seeing the exit frame. A dead session is evicted lazily
+	// in the stale-restart branch above, or eagerly by Stop on sandbox destroy.
 
 	return s, nil
 }
 
 // GetScrollback returns the current scrollback buffer for a sandbox+tab.
-// Works even after the PTY process has exited — the Session stays in the map
-// until the process exits, and scrollback is kept on the struct.
+// Works even after the PTY process has exited — the Session is retained in the
+// map past exit (until restart or sandbox destroy) with its scrollback intact.
 // Returns nil if no session has ever been started for this key.
 func (m *Manager) GetScrollback(sandboxID, tabID string) []byte {
 	key := sessionKey(sandboxID, tabID)
