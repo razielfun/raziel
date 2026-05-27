@@ -49,12 +49,14 @@ func (s *Server) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID          string `json:"id"`
-		Agent       string `json:"agent"`
-		CloneURL    string `json:"clone_url"`
-		Branch      string `json:"branch"`
-		Worktree    bool   `json:"worktree"`
-		GitHubToken string `json:"github_token"`
+		ID          string            `json:"id"`
+		Agent       string            `json:"agent"`
+		CloneURL    string            `json:"clone_url"`
+		Branch      string            `json:"branch"`
+		Worktree    bool              `json:"worktree"`
+		GitHubToken string            `json:"github_token"`
+		EnvVars     map[string]string `json:"env_vars"`
+		Prompt      string            `json:"prompt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonBadRequest(w, "invalid JSON body")
@@ -67,6 +69,8 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	cfg := sandbox.Config{
 		Agent:      body.Agent,
 		Guardrails: sandbox.DefaultGuardrails(),
+		EnvVars:    body.EnvVars,
+		Prompt:     body.Prompt,
 	}
 	sbx, err := s.sandboxProvider.Create(r.Context(), body.ID, cfg)
 	if err != nil {

@@ -52,8 +52,9 @@ func sessionKey(sandboxID, tabID string) string {
 }
 
 // GetOrStart returns an existing session for the given sandbox+tab pair,
-// or starts a new independent bash process if none exists.
-func (m *Manager) GetOrStart(sandboxID, tabID, workDir string) (*Session, error) {
+// or starts a new independent process if none exists.
+// agent, envVars, and prompt are only used when starting a new session.
+func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string) (*Session, error) {
 	key := sessionKey(sandboxID, tabID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -71,7 +72,7 @@ func (m *Manager) GetOrStart(sandboxID, tabID, workDir string) (*Session, error)
 		delete(m.sessions, key)
 	}
 
-	s, err := startSession(sandboxID, tabID, workDir)
+	s, err := startSession(sandboxID, tabID, workDir, agent, envVars, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +124,31 @@ func (m *Manager) Stop(sandboxID string) {
 	}
 }
 
-func startSession(sandboxID, tabID, workDir string) (*Session, error) {
+// agentCmd returns the command+args to run for a given agent identifier.
+// Extra tabs (tabID != "0") always get bash regardless of agent.
+func agentCmd(agent string) []string {
+	switch agent {
+	case "claude-code":
+		return []string{"claude", "--dangerously-skip-permissions"}
+	case "opencode":
+		return []string{"opencode"}
+	case "codex":
+		return []string{"codex"}
+	case "gemini-cli":
+		return []string{"gemini"}
+	default:
+		return []string{"/bin/bash"}
+	}
+}
+
+func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string) (*Session, error) {
+	cmd := agentCmd(agent)
 	args := bwrapArgs(workDir)
-	args = append(args, "/bin/bash")
+	args = append(args, cmd...)
 
 	c := exec.Command("bwrap", args...)
 	c.Dir = workDir
-	c.Env = []string{
+	baseEnv := []string{
 		"HOME=" + workDir,
 		"TMPDIR=/tmp",
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -138,6 +157,10 @@ func startSession(sandboxID, tabID, workDir string) (*Session, error) {
 		"RAZIEL_TAB=" + tabID,
 		"RAZIEL_WORKSPACE=" + workDir,
 	}
+	for k, v := range envVars {
+		baseEnv = append(baseEnv, k+"="+v)
+	}
+	c.Env = baseEnv
 
 	ptmx, err := pty.Start(c)
 	if err != nil {
@@ -148,6 +171,14 @@ func startSession(sandboxID, tabID, workDir string) (*Session, error) {
 		ptmx:        ptmx,
 		subscribers: make(map[Subscriber]struct{}),
 		exitCh:      make(chan struct{}),
+	}
+
+	// Write prompt as initial stdin after agent initialises (tab 0 + agent only)
+	if tabID == "0" && agent != "" && agent != "shell" && prompt != "" {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			ptmx.WriteString(prompt + "\n") //nolint:errcheck
+		}()
 	}
 
 	// Reader goroutine: write PTY output to scrollback + all subscribers

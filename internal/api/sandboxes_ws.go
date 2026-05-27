@@ -71,8 +71,14 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// Tab 0 gets the configured agent; extra tabs always get bash
+	agentForTab := sbx.Config.Agent
+	if tabID != "0" {
+		agentForTab = ""
+	}
+
 	// Get or start the persistent PTY session for this sandbox+tab
-	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath)
+	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath, agentForTab, sbx.Config.EnvVars, sbx.Config.Prompt)
 	if err != nil {
 		s.log.Error("pty manager GetOrStart", zap.String("id", id), zap.Error(err))
 		conn.Close(websocket.StatusInternalError, "failed to start PTY")

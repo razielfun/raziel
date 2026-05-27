@@ -27,10 +27,12 @@ type Guardrails struct {
 }
 
 type Config struct {
-	Agent       string // "claude-code" | "codex" | "gemini" | ""
-	Template    string // optional template to scaffold
-	Guardrails  Guardrails
+	Agent        string            // "claude-code" | "codex" | "gemini" | ""
+	Template     string            // optional template to scaffold
+	Guardrails   Guardrails
 	PortMappings map[int]int
+	EnvVars      map[string]string // injected into PTY process env (API keys etc.)
+	Prompt       string            // written to tab-0 stdin after agent starts
 }
 
 type Sandbox struct {
