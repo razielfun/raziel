@@ -29,6 +29,10 @@ import (
 func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sandboxID")
 	token := r.URL.Query().Get("token")
+	tabID := r.URL.Query().Get("tabId")
+	if tabID == "" {
+		tabID = "0"
+	}
 
 	if token == "" {
 		jsonBadRequest(w, "token query parameter is required")
@@ -67,8 +71,8 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Get or start the persistent PTY session for this sandbox
-	sess, err := s.ptyManager.GetOrStart(id, sbx.WorkspacePath)
+	// Get or start the persistent PTY session for this sandbox+tab
+	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath)
 	if err != nil {
 		s.log.Error("pty manager GetOrStart", zap.String("id", id), zap.Error(err))
 		conn.Close(websocket.StatusInternalError, "failed to start PTY")

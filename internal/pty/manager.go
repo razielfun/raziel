@@ -35,44 +35,55 @@ type Session struct {
 	exitCh      chan struct{} // closed when process exits
 }
 
-// Manager owns all active PTY sessions keyed by sandbox ID.
+// Manager owns all active PTY sessions keyed by "sandboxID:tabID".
+// Each tab in the UI maps to an independent bash process sharing the
+// same sandbox filesystem.
 type Manager struct {
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[string]*Session // key = sandboxID + ":" + tabID
 }
 
 func NewManager() *Manager {
 	return &Manager{sessions: make(map[string]*Session)}
 }
 
-// GetOrStart returns an existing session or starts a new one.
-func (m *Manager) GetOrStart(sandboxID, workDir string) (*Session, error) {
+func sessionKey(sandboxID, tabID string) string {
+	return sandboxID + ":" + tabID
+}
+
+// GetOrStart returns an existing session for the given sandbox+tab pair,
+// or starts a new independent bash process if none exists.
+func (m *Manager) GetOrStart(sandboxID, tabID, workDir string) (*Session, error) {
+	key := sessionKey(sandboxID, tabID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if s, ok := m.sessions[sandboxID]; ok {
+	if s, ok := m.sessions[key]; ok {
 		s.mu.Lock()
 		alive := s.exitCode == nil
 		s.mu.Unlock()
 		if alive {
 			return s, nil
 		}
-		// stale session — remove and restart
-		delete(m.sessions, sandboxID)
+		// stale — remove and restart (scrollback preserved in s.scrollback
+		// even after exit, so we keep the old session for log replay and
+		// only start a new process if the caller explicitly wants one)
+		delete(m.sessions, key)
 	}
 
-	s, err := startSession(sandboxID, workDir)
+	s, err := startSession(sandboxID, tabID, workDir)
 	if err != nil {
 		return nil, err
 	}
-	m.sessions[sandboxID] = s
+	m.sessions[key] = s
 
-	// Remove from map when process exits
+	// Remove from map when process exits, but keep scrollback accessible
+	// via the returned *Session pointer held by the caller.
 	go func() {
 		<-s.exitCh
 		m.mu.Lock()
-		if m.sessions[sandboxID] == s {
-			delete(m.sessions, sandboxID)
+		if m.sessions[key] == s {
+			delete(m.sessions, key)
 		}
 		m.mu.Unlock()
 	}()
@@ -80,20 +91,39 @@ func (m *Manager) GetOrStart(sandboxID, workDir string) (*Session, error) {
 	return s, nil
 }
 
-// Stop kills the session for a sandbox (called on sandbox destroy).
-func (m *Manager) Stop(sandboxID string) {
+// GetScrollback returns the current scrollback buffer for a sandbox+tab.
+// Works even after the PTY process has exited — the Session stays in the map
+// until the process exits, and scrollback is kept on the struct.
+// Returns nil if no session has ever been started for this key.
+func (m *Manager) GetScrollback(sandboxID, tabID string) []byte {
+	key := sessionKey(sandboxID, tabID)
 	m.mu.Lock()
-	s, ok := m.sessions[sandboxID]
-	if ok {
-		delete(m.sessions, sandboxID)
+	s, ok := m.sessions[key]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return s.Scrollback()
+}
+
+// Stop kills all PTY sessions belonging to a sandbox (called on sandbox destroy).
+func (m *Manager) Stop(sandboxID string) {
+	prefix := sandboxID + ":"
+	m.mu.Lock()
+	var toKill []*Session
+	for key, s := range m.sessions {
+		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+			toKill = append(toKill, s)
+			delete(m.sessions, key)
+		}
 	}
 	m.mu.Unlock()
-	if ok {
+	for _, s := range toKill {
 		s.ptmx.Close()
 	}
 }
 
-func startSession(sandboxID, workDir string) (*Session, error) {
+func startSession(sandboxID, tabID, workDir string) (*Session, error) {
 	args := bwrapArgs(workDir)
 	args = append(args, "/bin/bash")
 
@@ -105,6 +135,7 @@ func startSession(sandboxID, workDir string) (*Session, error) {
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"TERM=xterm-256color",
 		"RAZIEL_SANDBOX=" + sandboxID,
+		"RAZIEL_TAB=" + tabID,
 		"RAZIEL_WORKSPACE=" + workDir,
 	}
 
