@@ -114,6 +114,8 @@ func (s *Server) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 		jsonNotFound(w)
 		return
 	}
+	// Kill persistent PTY session if running
+	s.ptyManager.Stop(id)
 	if err := s.sandboxProvider.Destroy(r.Context(), id); err != nil {
 		s.log.Error("destroy sandbox", zap.String("id", id), zap.Error(err))
 		jsonInternalError(w, "failed to destroy sandbox")

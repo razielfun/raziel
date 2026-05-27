@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -13,12 +14,18 @@ import (
 	"github.com/raziel-ai/raziel/internal/sandbox"
 )
 
-// handleSandboxWs upgrades to WebSocket and attaches a PTY to the sandbox.
-// The caller must provide a short-lived token issued by handleRegisterWsToken.
+// handleSandboxWs upgrades to WebSocket and attaches to the sandbox's persistent
+// PTY session. If no session exists, one is started. Scrollback is replayed on
+// attach so the client sees prior output. Multiple clients can attach simultaneously.
 //
-// Protocol (binary frames):
-//   - Client → Server: raw stdin bytes OR {"type":"resize","cols":N,"rows":N} (text frame)
-//   - Server → Client: raw stdout/stderr bytes (binary frames)
+// Authentication: single-use token in ?token= query param (no Bearer header —
+// browsers cannot set arbitrary headers on WebSocket upgrades).
+//
+// Protocol:
+//   - Client → Server binary frame: raw stdin bytes
+//   - Client → Server text frame:   {"type":"resize","cols":N,"rows":N}
+//   - Server → Client binary frame: raw PTY output (replay + live)
+//   - Server → Client text frame:   {"type":"exit","code":N}  (process exited)
 func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sandboxID")
 	token := r.URL.Query().Get("token")
@@ -60,43 +67,27 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// stdin pipe: WS → PTY
-	pr, pw := io.Pipe()
+	// Get or start the persistent PTY session for this sandbox
+	sess, err := s.ptyManager.GetOrStart(id, sbx.WorkspacePath)
+	if err != nil {
+		s.log.Error("pty manager GetOrStart", zap.String("id", id), zap.Error(err))
+		conn.Close(websocket.StatusInternalError, "failed to start PTY")
+		return
+	}
 
-	// stdout pipe: PTY → WS
-	outPr, outPw := io.Pipe()
-
-	// resize channel
+	// stdin pipe fed by incoming WS messages
+	stdinPr, stdinPw := io.Pipe()
 	resizeCh := make(chan [2]uint16, 4)
 
-	// Forward PTY output to WebSocket (binary frames)
+	// Read WS → stdin / resize channel
 	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := outPr.Read(buf)
-			if n > 0 {
-				if werr := conn.Write(ctx, websocket.MessageBinary, buf[:n]); werr != nil {
-					cancel()
-					return
-				}
-			}
-			if err != nil {
-				cancel()
-				return
-			}
-		}
-	}()
-
-	// Forward WebSocket messages → PTY stdin or resize channel
-	go func() {
-		defer pw.Close()
+		defer stdinPw.Close()
 		defer close(resizeCh)
 		for {
 			msgType, msg, err := conn.Read(ctx)
 			if err != nil {
 				return
 			}
-			// Text frames: try JSON control (resize), otherwise treat as stdin
 			if msgType == websocket.MessageText {
 				var ctrl struct {
 					Type string `json:"type"`
@@ -111,18 +102,42 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			// Binary frames and non-JSON text frames = stdin
-			pw.Write(msg) //nolint:errcheck
+			stdinPw.Write(msg) //nolint:errcheck
 		}
 	}()
 
-	exitCode, err := s.sandboxProvider.RunTTY(ctx, sbx, []string{"/bin/bash"}, nil, pr, outPw, resizeCh)
-	outPw.Close()
-	if err != nil {
-		s.log.Warn("sandbox ws: RunTTY", zap.String("id", id), zap.Error(err))
+	// Keepalive to prevent Cloudflare 100s idle timeout
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				conn.Write(ctx, websocket.MessageBinary, []byte{}) //nolint:errcheck
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// send wraps conn.Write — all PTY output is binary frames
+	send := func(chunk []byte) error {
+		if len(chunk) == 0 {
+			return nil
+		}
+		return conn.Write(ctx, websocket.MessageBinary, chunk)
 	}
 
-	msg, _ := json.Marshal(map[string]any{"type": "exit", "code": exitCode})
-	conn.Write(ctx, websocket.MessageText, msg) //nolint:errcheck
+	exitCode, err := sess.Attach(ctx, stdinPr, send, resizeCh)
+	if err != nil && ctx.Err() == nil {
+		s.log.Warn("sandbox ws: attach ended", zap.String("id", id), zap.Error(err))
+	}
+
+	// If the PTY process actually exited (not just client disconnect), send exit frame
+	if sess.ExitCode() != nil {
+		msg, _ := json.Marshal(map[string]any{"type": "exit", "code": exitCode})
+		conn.Write(ctx, websocket.MessageText, msg) //nolint:errcheck
+	}
+
 	conn.Close(websocket.StatusNormalClosure, "")
 }

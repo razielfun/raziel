@@ -12,6 +12,7 @@ import (
 	"github.com/raziel-ai/raziel/internal/config"
 	"github.com/raziel-ai/raziel/internal/db"
 	"github.com/raziel-ai/raziel/internal/provider"
+	ptymanager "github.com/raziel-ai/raziel/internal/pty"
 	"github.com/raziel-ai/raziel/internal/queue"
 	"github.com/raziel-ai/raziel/internal/sandbox"
 	"github.com/raziel-ai/raziel/internal/storage"
@@ -25,6 +26,7 @@ type Server struct {
 	providers       *provider.Registry
 	sandboxProvider sandbox.Provider
 	wsTokens        *wsTokenStore
+	ptyManager      *ptymanager.Manager
 	log             *zap.Logger
 	router          chi.Router
 }
@@ -38,6 +40,7 @@ func New(cfg config.Config, database *db.DB, store storage.ArtifactStore, q queu
 		providers:       providers,
 		sandboxProvider: sbxProvider,
 		wsTokens:        newWsTokenStore(),
+		ptyManager:      ptymanager.NewManager(),
 		log:             log,
 	}
 	s.router = s.buildRouter()
