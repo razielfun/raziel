@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"time"
 
@@ -44,4 +46,9 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.status = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack delegates to the underlying ResponseWriter so WebSocket upgrades work.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return rw.ResponseWriter.(http.Hijacker).Hijack()
 }
