@@ -174,6 +174,10 @@ func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]st
 		"TMPDIR=/tmp",
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"TERM=xterm-256color",
+		// The daemon runs as root, so the bwrap'd agent is uid 0. Claude Code
+		// refuses --dangerously-skip-permissions as root unless IS_SANDBOX=1
+		// marks the process as running in an isolated sandbox (which it is).
+		"IS_SANDBOX=1",
 		"RAZIEL_SANDBOX=" + sandboxID,
 		"RAZIEL_TAB=" + tabID,
 		"RAZIEL_WORKSPACE=" + workDir,
