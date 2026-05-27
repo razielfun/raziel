@@ -20,11 +20,6 @@ import (
 const (
 	scrollbackBytes = 64 * 1024 // 64 KB ring buffer per session
 	readBufSize     = 4096
-
-	// The sandbox runs as a real non-root user (parent daemon is root, so
-	// bwrap can genuine-setuid to this uid — keeping setuid sudo functional).
-	sandboxUID = 1000
-	sandboxGID = 1000
 )
 
 // validUsername keeps the synthetic /etc/passwd entry safe; falls back to "user".
@@ -204,12 +199,11 @@ func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]st
 		"USER=" + su.name,
 		"LOGNAME=" + su.name,
 		"TMPDIR=/tmp",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		// HOME-based prefixes so the non-root user can install global packages
+		// (npm -g, pip --user, etc.) into its own writable HOME without root.
+		"NPM_CONFIG_PREFIX=" + home + "/.npm-global",
+		"PATH=" + home + "/.npm-global/bin:" + home + "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"TERM=xterm-256color",
-		// The sandbox runs as a real non-root user, but keep IS_SANDBOX so the
-		// agent knows it's in an isolated environment (and as a safety net if a
-		// future config runs it as root).
-		"IS_SANDBOX=1",
 		"RAZIEL_SANDBOX=" + sandboxID,
 		"RAZIEL_TAB=" + tabID,
 		"RAZIEL_WORKSPACE=" + workDir,
@@ -400,17 +394,29 @@ func (s *Session) Attach(ctx context.Context, stdin io.Reader, send func([]byte)
 	}
 }
 
+// sandboxUID/GID is the in-namespace uid the sandbox runs as. bwrap maps it to
+// host root (single-entry map "1000 0 1"), so host-root-owned binds (workspace,
+// home) appear owned by 1000 inside and are fully writable — no host chown
+// needed. Being non-root (uid != 0) means agents like Claude Code launch
+// without the IS_SANDBOX escape hatch, while still able to install into their
+// HOME-based tool prefix.
+const (
+	sandboxUID = 1000
+	sandboxGID = 1000
+)
+
 // sandboxUser holds the resolved identity + paths for a sandbox's non-root user.
 type sandboxUser struct {
-	name    string
-	home    string // host path backing the in-sandbox /home/<name>
-	etcDir  string // host dir holding synthetic passwd/group/hosts/sudoers
+	name   string
+	home   string // host path backing the in-sandbox /home/<name>
+	etcDir string // host dir holding synthetic passwd/group/hosts
 }
 
-// setupSandboxUser prepares a real non-root identity for the sandbox: it chowns
-// the workspace to the sandbox uid and writes synthetic /etc files (passwd,
-// group, hosts, sudoers) so the bwrap'd process runs as the named user with
-// passwordless sudo and hostname "raziel". Idempotent across restarts.
+// setupSandboxUser prepares the sandbox identity: the process runs as a real
+// non-root user (uid 1000) inside a user namespace, mapped to host root so the
+// root-owned workspace/home binds are writable. A synthetic /etc/passwd maps
+// the Clerk username to uid 1000 (so whoami/$USER show it); /etc/hosts sets the
+// hostname "raziel". Idempotent across restarts.
 func setupSandboxUser(workDir, rawName string) (sandboxUser, error) {
 	name := sanitizeUsername(rawName)
 	sandboxDir := filepath.Dir(workDir) // ~/.raziel/sandboxes/<id>
@@ -428,7 +434,6 @@ func setupSandboxUser(workDir, rawName string) (sandboxUser, error) {
 		name, sandboxUID, sandboxGID, name, name)
 	group := fmt.Sprintf("root:x:0:\n%s:x:%d:\n", name, sandboxGID)
 	hosts := "127.0.0.1 localhost raziel\n::1 localhost raziel\n"
-	sudoers := fmt.Sprintf("%s ALL=(ALL) NOPASSWD:ALL\n", name)
 
 	writes := []struct {
 		path string
@@ -438,31 +443,14 @@ func setupSandboxUser(workDir, rawName string) (sandboxUser, error) {
 		{filepath.Join(etcDir, "passwd"), passwd, 0o644},
 		{filepath.Join(etcDir, "group"), group, 0o644},
 		{filepath.Join(etcDir, "hosts"), hosts, 0o644},
-		{filepath.Join(etcDir, "sudoers"), sudoers, 0o440},
 	}
 	for _, wf := range writes {
 		if err := os.WriteFile(wf.path, []byte(wf.data), wf.mode); err != nil {
 			return sandboxUser{}, fmt.Errorf("write %s: %w", wf.path, err)
 		}
 	}
-	// sudoers.d entry must be root-owned 0440 or sudo ignores it.
-	_ = os.Chown(filepath.Join(etcDir, "sudoers"), 0, 0) //nolint:errcheck
-
-	// The workspace and home must be writable by the sandbox uid.
-	_ = chownTree(workDir, sandboxUID, sandboxGID)  //nolint:errcheck
-	_ = os.Chown(home, sandboxUID, sandboxGID)      //nolint:errcheck
 
 	return sandboxUser{name: name, home: home, etcDir: etcDir}, nil
-}
-
-func chownTree(root string, uid, gid int) error {
-	return filepath.Walk(root, func(p string, _ os.FileInfo, err error) error {
-		if err != nil {
-			return nil // best-effort; skip unreadable entries
-		}
-		_ = os.Chown(p, uid, gid) //nolint:errcheck
-		return nil
-	})
 }
 
 func bwrapArgs(workDir string, su sandboxUser) []string {
@@ -473,17 +461,12 @@ func bwrapArgs(workDir string, su sandboxUser) []string {
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/sbin", "/sbin",
 		// /etc essentials + synthetic identity files.
-		"--ro-bind", "/etc/sudoers", "/etc/sudoers",
-		"--ro-bind-try", "/etc/sudo.conf", "/etc/sudo.conf",
-		"--ro-bind-try", "/etc/pam.d", "/etc/pam.d",
-		"--ro-bind-try", "/etc/security", "/etc/security",
 		"--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
 		"--ro-bind-try", "/etc/ssl", "/etc/ssl",
 		"--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
 		"--ro-bind", filepath.Join(su.etcDir, "passwd"), "/etc/passwd",
 		"--ro-bind", filepath.Join(su.etcDir, "group"), "/etc/group",
 		"--ro-bind", filepath.Join(su.etcDir, "hosts"), "/etc/hosts",
-		"--ro-bind", filepath.Join(su.etcDir, "sudoers"), "/etc/sudoers.d/" + su.name,
 		"--bind", workDir, workDir,
 		"--bind", su.home, "/home/" + su.name,
 		"--proc", "/proc",
@@ -492,6 +475,10 @@ func bwrapArgs(workDir string, su sandboxUser) []string {
 		"--unshare-pid",
 		"--unshare-uts",
 		"--hostname", "raziel",
+		// Non-root user namespace: in-ns uid 1000 maps to host root, so the
+		// root-owned workspace/home binds are writable while the process is
+		// genuinely non-root (Claude launches without IS_SANDBOX).
+		"--unshare-user",
 		"--uid", fmt.Sprintf("%d", sandboxUID),
 		"--gid", fmt.Sprintf("%d", sandboxGID),
 		"--die-with-parent",
