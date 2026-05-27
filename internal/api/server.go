@@ -63,6 +63,8 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Public
 	r.Get("/health", s.handleHealth)
+	// Token-authenticated WebSocket endpoint (no Bearer header — token is in query param)
+	r.Get("/v0/sandboxes/{sandboxID}/ws", s.handleSandboxWs)
 
 	// Authenticated
 	authMW := auth.SingleTenantMiddleware(s.cfg.APISecret)
@@ -94,7 +96,6 @@ func (s *Server) buildRouter() chi.Router {
 				r.Post("/stop", s.handleStopSandbox)
 				r.Delete("/", s.handleDestroySandbox)
 				r.Post("/ws-tokens", s.handleRegisterWsToken)
-				r.Get("/ws", s.handleSandboxWs)
 			})
 		})
 	})
