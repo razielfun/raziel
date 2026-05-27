@@ -35,6 +35,7 @@ type sandboxJSON struct {
 	WorkspacePath string      `json:"workspace_path"`
 	Config        configJSON  `json:"config"`
 	CreatedAt     time.Time   `json:"created_at"`
+	AgentStarted  bool        `json:"agent_started"`
 }
 
 type configJSON struct {
@@ -117,6 +118,7 @@ func toJSON(sbx *Sandbox) sandboxJSON {
 		State:         string(sbx.State),
 		WorkspacePath: sbx.WorkspacePath,
 		CreatedAt:     sbx.CreatedAt,
+		AgentStarted:  sbx.AgentStarted,
 		Config: configJSON{
 			Agent:           sbx.Config.Agent,
 			Template:        sbx.Config.Template,
@@ -140,6 +142,7 @@ func fromJSON(j sandboxJSON) *Sandbox {
 		State:         State(j.State),
 		WorkspacePath: j.WorkspacePath,
 		CreatedAt:     j.CreatedAt,
+		AgentStarted:  j.AgentStarted,
 		Config: Config{
 			Agent:    j.Config.Agent,
 			Template: j.Config.Template,

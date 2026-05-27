@@ -77,12 +77,21 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 		agentForTab = ""
 	}
 
-	// Get or start the persistent PTY session for this sandbox+tab
-	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath, agentForTab, sbx.Config.EnvVars, sbx.Config.Prompt)
+	// Get or start the persistent PTY session for this sandbox+tab.
+	// sbx.AgentStarted drives first-launch vs resume for the agent.
+	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath, agentForTab, sbx.Config.EnvVars, sbx.Config.Prompt, sbx.AgentStarted)
 	if err != nil {
 		s.log.Error("pty manager GetOrStart", zap.String("id", id), zap.Error(err))
 		conn.Close(websocket.StatusInternalError, "failed to start PTY")
 		return
+	}
+
+	// Record that tab 0's agent has launched, so a later attach/restart resumes
+	// the conversation instead of starting a new one.
+	if agentForTab != "" && agentForTab != "shell" && !sbx.AgentStarted {
+		if err := s.sandboxProvider.MarkAgentStarted(id); err != nil {
+			s.log.Warn("mark agent started", zap.String("id", id), zap.Error(err))
+		}
 	}
 
 	// stdin pipe fed by incoming WS messages

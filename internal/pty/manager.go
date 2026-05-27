@@ -53,8 +53,10 @@ func sessionKey(sandboxID, tabID string) string {
 
 // GetOrStart returns an existing session for the given sandbox+tab pair,
 // or starts a new independent process if none exists.
-// agent, envVars, and prompt are only used when starting a new session.
-func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string) (*Session, error) {
+// agent, envVars, prompt, and started are only used when starting a new session.
+// sessionID (== sandboxID) is the agent conversation id; started reports whether
+// the agent has launched before, so a restart resumes instead of starting fresh.
+func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string, started bool) (*Session, error) {
 	key := sessionKey(sandboxID, tabID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -72,7 +74,7 @@ func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars ma
 		delete(m.sessions, key)
 	}
 
-	s, err := startSession(sandboxID, tabID, workDir, agent, envVars, prompt)
+	s, err := startSession(sandboxID, tabID, workDir, agent, envVars, prompt, started)
 	if err != nil {
 		return nil, err
 	}
@@ -126,23 +128,47 @@ func (m *Manager) Stop(sandboxID string) {
 
 // agentCmd returns the command+args to run for a given agent identifier.
 // Extra tabs (tabID != "0") always get bash regardless of agent.
-func agentCmd(agent string) []string {
+//
+// sessionID equals the sandbox ID and is used as Claude Code's --session-id (a
+// caller-supplied UUID). started reports whether the agent has been launched
+// before in this sandbox: on first launch we start a new conversation (and pass
+// the prompt as an argument); on later launches we resume the prior one.
+func agentCmd(agent, sessionID, prompt string, started bool) []string {
 	switch agent {
 	case "claude-code":
-		return []string{"claude", "--dangerously-skip-permissions"}
-	case "opencode":
-		return []string{"opencode"}
+		if started {
+			return []string{"claude", "--resume", sessionID, "--dangerously-skip-permissions"}
+		}
+		c := []string{"claude", "--session-id", sessionID, "--dangerously-skip-permissions"}
+		if prompt != "" {
+			c = append(c, prompt)
+		}
+		return c
 	case "codex":
-		return []string{"codex"}
-	case "gemini-cli":
-		return []string{"gemini"}
+		if started {
+			return []string{"codex", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox"}
+		}
+		c := []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}
+		if prompt != "" {
+			c = append(c, prompt)
+		}
+		return c
+	case "opencode":
+		if started {
+			return []string{"opencode", "--continue"}
+		}
+		c := []string{"opencode"}
+		if prompt != "" {
+			c = append(c, "--prompt", prompt)
+		}
+		return c
 	default:
 		return []string{"/bin/bash"}
 	}
 }
 
-func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string) (*Session, error) {
-	cmd := agentCmd(agent)
+func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string, started bool) (*Session, error) {
+	cmd := agentCmd(agent, sandboxID, prompt, started)
 	args := bwrapArgs(workDir)
 	args = append(args, cmd...)
 
@@ -171,14 +197,6 @@ func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]st
 		ptmx:        ptmx,
 		subscribers: make(map[Subscriber]struct{}),
 		exitCh:      make(chan struct{}),
-	}
-
-	// Write prompt as initial stdin after agent initialises (tab 0 + agent only)
-	if tabID == "0" && agent != "" && agent != "shell" && prompt != "" {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			ptmx.WriteString(prompt + "\n") //nolint:errcheck
-		}()
 	}
 
 	// Reader goroutine: write PTY output to scrollback + all subscribers

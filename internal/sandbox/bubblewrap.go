@@ -178,6 +178,18 @@ func (p *BubblewrapProvider) Get(id string) (*Sandbox, error) {
 	return p.store.Load(id)
 }
 
+func (p *BubblewrapProvider) MarkAgentStarted(id string) error {
+	sbx, err := p.store.Load(id)
+	if err != nil {
+		return err
+	}
+	if sbx.AgentStarted {
+		return nil
+	}
+	sbx.AgentStarted = true
+	return p.store.Save(sbx)
+}
+
 func (p *BubblewrapProvider) List() ([]*Sandbox, error) {
 	return p.store.List()
 }

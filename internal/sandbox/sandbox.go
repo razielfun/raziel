@@ -41,6 +41,7 @@ type Sandbox struct {
 	WorkspacePath string
 	Config        Config
 	CreatedAt     time.Time
+	AgentStarted  bool // true once tab-0's agent has been launched at least once (drives resume)
 }
 
 // DefaultGuardrails returns permissive defaults suitable for development.
@@ -66,4 +67,7 @@ type Provider interface {
 	Destroy(ctx context.Context, id string) error
 	Get(id string) (*Sandbox, error)
 	List() ([]*Sandbox, error)
+	// MarkAgentStarted flips the AgentStarted flag and persists it, so a later
+	// launch knows to resume the agent's conversation instead of starting fresh.
+	MarkAgentStarted(id string) error
 }
