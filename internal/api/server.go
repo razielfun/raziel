@@ -102,6 +102,7 @@ func (s *Server) buildRouter() chi.Router {
 				r.Delete("/", s.handleDestroySandbox)
 				r.Post("/ws-tokens", s.handleRegisterWsToken)
 				r.Get("/tabs/{tabID}/scrollback", s.handleGetScrollback)
+				r.Get("/diff", s.handleGetDiff)
 			})
 		})
 	})

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -152,6 +154,37 @@ func (s *Server) handleRegisterWsToken(w http.ResponseWriter, r *http.Request) {
 		"sandbox_id": id,
 		"expires_in": 60,
 	})
+}
+
+// handleGetDiff returns the git diff (working tree + staged) of the sandbox
+// workspace. Empty string when the workspace isn't a git repo or has no changes.
+func (s *Server) handleGetDiff(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "sandboxID")
+	sbx, err := s.sandboxProvider.Get(id)
+	if err != nil {
+		jsonNotFound(w)
+		return
+	}
+
+	// Not a git repo → no diff (don't error).
+	if _, statErr := os.Stat(filepath.Join(sbx.WorkspacePath, ".git")); statErr != nil {
+		jsonOK(w, map[string]any{"diff": ""})
+		return
+	}
+
+	cmd := exec.Command("git", "-C", sbx.WorkspacePath, "diff", "HEAD")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Fall back to plain working-tree diff if HEAD is unavailable.
+		cmd = exec.Command("git", "-C", sbx.WorkspacePath, "diff")
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			s.log.Warn("sandbox git diff failed", zap.String("id", id), zap.Error(err))
+			jsonOK(w, map[string]any{"diff": ""})
+			return
+		}
+	}
+	jsonOK(w, map[string]any{"diff": string(out)})
 }
 
 // cloneRepo runs git clone in the sandbox workspace. Runs in a goroutine after
