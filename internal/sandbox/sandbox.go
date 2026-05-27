@@ -33,6 +33,7 @@ type Config struct {
 	PortMappings map[int]int
 	EnvVars      map[string]string // injected into PTY process env (API keys etc.)
 	Prompt       string            // written to tab-0 stdin after agent starts
+	Username     string            // non-root user the sandbox runs as (Clerk username)
 }
 
 type Sandbox struct {

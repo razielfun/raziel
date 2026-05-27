@@ -59,6 +59,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		GitHubToken string            `json:"github_token"`
 		EnvVars     map[string]string `json:"env_vars"`
 		Prompt      string            `json:"prompt"`
+		Username    string            `json:"username"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonBadRequest(w, "invalid JSON body")
@@ -73,6 +74,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Guardrails: sandbox.DefaultGuardrails(),
 		EnvVars:    body.EnvVars,
 		Prompt:     body.Prompt,
+		Username:   body.Username,
 	}
 	sbx, err := s.sandboxProvider.Create(r.Context(), body.ID, cfg)
 	if err != nil {

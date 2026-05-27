@@ -79,7 +79,7 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 
 	// Get or start the persistent PTY session for this sandbox+tab.
 	// sbx.AgentStarted drives first-launch vs resume for the agent.
-	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath, agentForTab, sbx.Config.EnvVars, sbx.Config.Prompt, sbx.AgentStarted)
+	sess, err := s.ptyManager.GetOrStart(id, tabID, sbx.WorkspacePath, agentForTab, sbx.Config.EnvVars, sbx.Config.Prompt, sbx.AgentStarted, sbx.Config.Username)
 	if err != nil {
 		s.log.Error("pty manager GetOrStart", zap.String("id", id), zap.Error(err))
 		conn.Close(websocket.StatusInternalError, "failed to start PTY")

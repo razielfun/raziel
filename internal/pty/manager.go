@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +20,28 @@ import (
 const (
 	scrollbackBytes = 64 * 1024 // 64 KB ring buffer per session
 	readBufSize     = 4096
+
+	// The sandbox runs as a real non-root user (parent daemon is root, so
+	// bwrap can genuine-setuid to this uid — keeping setuid sudo functional).
+	sandboxUID = 1000
+	sandboxGID = 1000
 )
+
+// validUsername keeps the synthetic /etc/passwd entry safe; falls back to "user".
+var (
+	validUsername   = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	invalidNameChar = regexp.MustCompile(`[^a-z0-9_-]`)
+)
+
+func sanitizeUsername(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	n = invalidNameChar.ReplaceAllString(n, "-")
+	n = strings.TrimLeft(n, "-")
+	if n == "" || !validUsername.MatchString(n) {
+		return "user"
+	}
+	return n
+}
 
 // Subscriber is a channel that receives PTY output chunks.
 type Subscriber chan []byte
@@ -56,7 +80,7 @@ func sessionKey(sandboxID, tabID string) string {
 // agent, envVars, prompt, and started are only used when starting a new session.
 // sessionID (== sandboxID) is the agent conversation id; started reports whether
 // the agent has launched before, so a restart resumes instead of starting fresh.
-func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string, started bool) (*Session, error) {
+func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string, started bool, username string) (*Session, error) {
 	key := sessionKey(sandboxID, tabID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -74,7 +98,7 @@ func (m *Manager) GetOrStart(sandboxID, tabID, workDir, agent string, envVars ma
 		delete(m.sessions, key)
 	}
 
-	s, err := startSession(sandboxID, tabID, workDir, agent, envVars, prompt, started)
+	s, err := startSession(sandboxID, tabID, workDir, agent, envVars, prompt, started, username)
 	if err != nil {
 		return nil, err
 	}
@@ -162,21 +186,29 @@ func agentCmd(agent, sessionID, prompt string, started bool) []string {
 	}
 }
 
-func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string, started bool) (*Session, error) {
+func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]string, prompt string, started bool, username string) (*Session, error) {
+	su, err := setupSandboxUser(workDir, username)
+	if err != nil {
+		return nil, fmt.Errorf("setup sandbox user: %w", err)
+	}
+
 	cmd := agentCmd(agent, sandboxID, prompt, started)
-	args := bwrapArgs(workDir)
+	args := bwrapArgs(workDir, su)
 	args = append(args, cmd...)
 
 	c := exec.Command("bwrap", args...)
 	c.Dir = workDir
+	home := "/home/" + su.name
 	baseEnv := []string{
-		"HOME=" + workDir,
+		"HOME=" + home,
+		"USER=" + su.name,
+		"LOGNAME=" + su.name,
 		"TMPDIR=/tmp",
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"TERM=xterm-256color",
-		// The daemon runs as root, so the bwrap'd agent is uid 0. Claude Code
-		// refuses --dangerously-skip-permissions as root unless IS_SANDBOX=1
-		// marks the process as running in an isolated sandbox (which it is).
+		// The sandbox runs as a real non-root user, but keep IS_SANDBOX so the
+		// agent knows it's in an isolated environment (and as a safety net if a
+		// future config runs it as root).
 		"IS_SANDBOX=1",
 		"RAZIEL_SANDBOX=" + sandboxID,
 		"RAZIEL_TAB=" + tabID,
@@ -368,21 +400,104 @@ func (s *Session) Attach(ctx context.Context, stdin io.Reader, send func([]byte)
 	}
 }
 
-func bwrapArgs(workDir string) []string {
-	return []string{
+// sandboxUser holds the resolved identity + paths for a sandbox's non-root user.
+type sandboxUser struct {
+	name    string
+	home    string // host path backing the in-sandbox /home/<name>
+	etcDir  string // host dir holding synthetic passwd/group/hosts/sudoers
+}
+
+// setupSandboxUser prepares a real non-root identity for the sandbox: it chowns
+// the workspace to the sandbox uid and writes synthetic /etc files (passwd,
+// group, hosts, sudoers) so the bwrap'd process runs as the named user with
+// passwordless sudo and hostname "raziel". Idempotent across restarts.
+func setupSandboxUser(workDir, rawName string) (sandboxUser, error) {
+	name := sanitizeUsername(rawName)
+	sandboxDir := filepath.Dir(workDir) // ~/.raziel/sandboxes/<id>
+	etcDir := filepath.Join(sandboxDir, ".raziel-etc")
+	home := filepath.Join(sandboxDir, "home")
+
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		return sandboxUser{}, fmt.Errorf("etc dir: %w", err)
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return sandboxUser{}, fmt.Errorf("home dir: %w", err)
+	}
+
+	passwd := fmt.Sprintf("root:x:0:0:root:/root:/bin/bash\n%s:x:%d:%d:%s:/home/%s:/bin/bash\n",
+		name, sandboxUID, sandboxGID, name, name)
+	group := fmt.Sprintf("root:x:0:\n%s:x:%d:\n", name, sandboxGID)
+	hosts := "127.0.0.1 localhost raziel\n::1 localhost raziel\n"
+	sudoers := fmt.Sprintf("%s ALL=(ALL) NOPASSWD:ALL\n", name)
+
+	writes := []struct {
+		path string
+		data string
+		mode os.FileMode
+	}{
+		{filepath.Join(etcDir, "passwd"), passwd, 0o644},
+		{filepath.Join(etcDir, "group"), group, 0o644},
+		{filepath.Join(etcDir, "hosts"), hosts, 0o644},
+		{filepath.Join(etcDir, "sudoers"), sudoers, 0o440},
+	}
+	for _, wf := range writes {
+		if err := os.WriteFile(wf.path, []byte(wf.data), wf.mode); err != nil {
+			return sandboxUser{}, fmt.Errorf("write %s: %w", wf.path, err)
+		}
+	}
+	// sudoers.d entry must be root-owned 0440 or sudo ignores it.
+	_ = os.Chown(filepath.Join(etcDir, "sudoers"), 0, 0) //nolint:errcheck
+
+	// The workspace and home must be writable by the sandbox uid.
+	_ = chownTree(workDir, sandboxUID, sandboxGID)  //nolint:errcheck
+	_ = os.Chown(home, sandboxUID, sandboxGID)      //nolint:errcheck
+
+	return sandboxUser{name: name, home: home, etcDir: etcDir}, nil
+}
+
+func chownTree(root string, uid, gid int) error {
+	return filepath.Walk(root, func(p string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return nil // best-effort; skip unreadable entries
+		}
+		_ = os.Chown(p, uid, gid) //nolint:errcheck
+		return nil
+	})
+}
+
+func bwrapArgs(workDir string, su sandboxUser) []string {
+	args := []string{
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind", "/lib", "/lib",
 		"--ro-bind", "/lib64", "/lib64",
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/sbin", "/sbin",
+		// /etc essentials + synthetic identity files.
+		"--ro-bind", "/etc/sudoers", "/etc/sudoers",
+		"--ro-bind-try", "/etc/sudo.conf", "/etc/sudo.conf",
+		"--ro-bind-try", "/etc/pam.d", "/etc/pam.d",
+		"--ro-bind-try", "/etc/security", "/etc/security",
+		"--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+		"--ro-bind-try", "/etc/ssl", "/etc/ssl",
+		"--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
+		"--ro-bind", filepath.Join(su.etcDir, "passwd"), "/etc/passwd",
+		"--ro-bind", filepath.Join(su.etcDir, "group"), "/etc/group",
+		"--ro-bind", filepath.Join(su.etcDir, "hosts"), "/etc/hosts",
+		"--ro-bind", filepath.Join(su.etcDir, "sudoers"), "/etc/sudoers.d/" + su.name,
 		"--bind", workDir, workDir,
+		"--bind", su.home, "/home/" + su.name,
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--tmpfs", "/tmp",
 		"--unshare-pid",
+		"--unshare-uts",
+		"--hostname", "raziel",
+		"--uid", fmt.Sprintf("%d", sandboxUID),
+		"--gid", fmt.Sprintf("%d", sandboxGID),
 		"--die-with-parent",
 		"--chdir", workDir,
 	}
+	return args
 }
 
 // keepalive sends a no-op to prevent Cloudflare from closing idle connections.
