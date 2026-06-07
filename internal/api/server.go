@@ -26,12 +26,14 @@ type Server struct {
 	providers       *provider.Registry
 	sandboxProvider sandbox.Provider
 	wsTokens        *wsTokenStore
+	ptyAuth         ptymanager.PtyAuthorizer // attach-authorization seam (default: wsTokens)
 	ptyManager      *ptymanager.Manager
 	log             *zap.Logger
 	router          chi.Router
 }
 
 func New(cfg config.Config, database *db.DB, store storage.ArtifactStore, q queue.Queue, providers *provider.Registry, sbxProvider sandbox.Provider, log *zap.Logger) *Server {
+	wsTokens := newWsTokenStore()
 	s := &Server{
 		cfg:             cfg,
 		db:              database,
@@ -39,9 +41,13 @@ func New(cfg config.Config, database *db.DB, store storage.ArtifactStore, q queu
 		queue:           q,
 		providers:       providers,
 		sandboxProvider: sbxProvider,
-		wsTokens:        newWsTokenStore(),
-		ptyManager:      ptymanager.NewManager(),
-		log:             log,
+		wsTokens:        wsTokens,
+		// Default attach authorization = the local single-use token store (the
+		// existing inbound-WS behavior). An enrolled box can swap in a
+		// control-plane backing (#79 host token) via the same seam.
+		ptyAuth:    wsTokens,
+		ptyManager: ptymanager.NewManager(),
+		log:        log,
 	}
 	s.router = s.buildRouter()
 	return s

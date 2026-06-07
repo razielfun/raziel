@@ -39,13 +39,12 @@ func (s *Server) handleSandboxWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sandboxID, ok := s.wsTokens.Consume(token)
-	if !ok {
-		jsonError(w, http.StatusUnauthorized, "invalid or expired token", "UNAUTHORIZED", "Request a new token")
-		return
-	}
-	if sandboxID != id {
-		jsonError(w, http.StatusForbidden, "token does not match sandbox", "FORBIDDEN", "")
+	// Authorize through the attach seam: the local single-use token store by
+	// default, or a control-plane host-token backing for an enrolled box. The
+	// grant is bound to the requested sandbox id, so a token for another resource
+	// can't attach here (P0 #2) — uniformly, whichever backing answered.
+	if _, aerr := s.authorizeAttach(token, id); aerr != nil {
+		jsonError(w, aerr.Status, aerr.Msg, aerr.Code, aerr.Hint)
 		return
 	}
 
