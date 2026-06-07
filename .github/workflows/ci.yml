@@ -18,6 +18,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      # bubblewrap backs the per-session OS sandbox; the internal/sandbox tests
+      # exec `bwrap` directly, so it must be on PATH for them to run.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: go mod download
       # On a real Linux runner the //go:build linux PTY subsystem (internal/pty,
       # internal/api, stats, scrollback) compiles AND its tests run — the parts
