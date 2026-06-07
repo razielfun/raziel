@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -49,9 +50,12 @@ type Session struct {
 	cmd         *os.File // unused after start, kept for close
 	scrollback  []byte   // ring-ish: we just append and trim to cap
 	subscribers map[Subscriber]struct{}
-	exitCode    *int  // non-nil once process exits
+	exitCode    *int // non-nil once process exits
 	exitOnce    sync.Once
 	exitCh      chan struct{} // closed when process exits
+	// secrets injected into this session's agent env, held in memory only and
+	// zeroized when the process exits or the session is stopped (SE-I1).
+	secrets *SecretEnv
 }
 
 // Manager owns all active PTY sessions keyed by "sandboxID:tabID".
@@ -63,6 +67,11 @@ type Manager struct {
 }
 
 func NewManager() *Manager {
+	// Disable core dumps process-wide so a crash in agentd OR any agent it
+	// spawns (children inherit RLIMIT_CORE) can never spill injected secrets
+	// from memory to a core file on disk (threat-model SE-I1).
+	rl := coreDumpRlimit()
+	_ = syscall.Setrlimit(syscall.RLIMIT_CORE, &rl)
 	return &Manager{sessions: make(map[string]*Session)}
 }
 
@@ -137,6 +146,13 @@ func (m *Manager) Stop(sandboxID string) {
 	m.mu.Unlock()
 	for _, s := range toKill {
 		s.ptmx.Close()
+		// Wipe injected secrets on destroy too — Stop may race ahead of the
+		// process's natural exit, so don't rely on the exit handler (SE-I1).
+		s.mu.Lock()
+		if s.secrets != nil {
+			s.secrets.Zero()
+		}
+		s.mu.Unlock()
 	}
 }
 
@@ -208,13 +224,20 @@ func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]st
 		"RAZIEL_TAB=" + tabID,
 		"RAZIEL_WORKSPACE=" + workDir,
 	}
-	for k, v := range envVars {
-		baseEnv = append(baseEnv, k+"="+v)
-	}
-	c.Env = baseEnv
+	// Inject secrets in memory ONLY: they reach the child through c.Env (a
+	// []string), never an env file or any path on disk (SE-I1). Held in a
+	// zeroizable carrier so the plaintext can be wiped at session end.
+	//
+	// Core dumps are disabled process-wide in NewManager (RLIMIT_CORE={0,0},
+	// inherited by this child) so a crash can't spill these secrets to a core
+	// file on disk. PR_SET_DUMPABLE=0 / MADV_DONTDUMP (anti-ptrace, anti-swap)
+	// are a follow-up hardening — they need a prctl pre-exec shim (SE-I1 TODO).
+	secrets := NewSecretEnv(envVars)
+	c.Env = buildSpawnEnv(baseEnv, secrets)
 
 	ptmx, err := pty.Start(c)
 	if err != nil {
+		secrets.Zero() // never leave plaintext behind on a failed spawn
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
 
@@ -222,6 +245,7 @@ func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]st
 		ptmx:        ptmx,
 		subscribers: make(map[Subscriber]struct{}),
 		exitCh:      make(chan struct{}),
+		secrets:     secrets,
 	}
 
 	// Reader goroutine: write PTY output to scrollback + all subscribers
@@ -253,6 +277,11 @@ func startSession(sandboxID, tabID, workDir, agent string, envVars map[string]st
 				close(sub)
 			}
 			s.subscribers = make(map[Subscriber]struct{})
+			// Zeroize the injected secrets the moment the agent process exits —
+			// the session is over, so no plaintext should linger in memory (SE-I1).
+			if s.secrets != nil {
+				s.secrets.Zero()
+			}
 			s.mu.Unlock()
 			close(s.exitCh)
 		})
@@ -317,10 +346,19 @@ func (s *Session) broadcast(chunk []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Append to scrollback, trim if over cap
+	// Append to scrollback, trim if over cap.
 	s.scrollback = append(s.scrollback, chunk...)
 	if len(s.scrollback) > scrollbackBytes {
 		s.scrollback = s.scrollback[len(s.scrollback)-scrollbackBytes:]
+	}
+	// Scrub known secrets from the PERSISTED buffer before it can be stored or
+	// replayed to a later attach (SE-I2). Scrubbing the whole buffer (not just
+	// this chunk) catches a secret split across two PTY reads. The LIVE fan-out
+	// below stays unscrubbed — the authorized user's terminal shows real output;
+	// only the at-rest copy is redacted. Secrets are live here (zeroized only at
+	// session end), so the buffer is always scrubbed while the values exist.
+	if s.secrets != nil {
+		s.scrollback = scrubSecrets(s.scrollback, s.secrets.values())
 	}
 
 	// Fan out to all subscribers (non-blocking — drop if subscriber is slow)

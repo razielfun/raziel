@@ -1,8 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"sync"
 	"time"
+
+	ptymanager "github.com/raziel-ai/raziel/internal/pty"
 )
 
 // wsTokenStore is a thread-safe in-memory store for short-lived WebSocket tokens.
@@ -32,6 +35,19 @@ func (s *wsTokenStore) Register(token, sandboxID string) {
 		sandboxID: sandboxID,
 		expiresAt: time.Now().Add(60 * time.Second),
 	}
+}
+
+// Authorize makes wsTokenStore a pty.PtyAuthorizer: it consumes the token and
+// returns the sandbox it's bound to as the grant Target. This is the LOCAL backing
+// of the attach seam — the default inbound-WS behavior, unchanged (TTL + single
+// use). The UserID is empty: this single-tenant store doesn't track a user (the
+// control-plane backing does, for multi-tenant boxes).
+func (s *wsTokenStore) Authorize(token string) (ptymanager.AttachGrant, error) {
+	sandboxID, ok := s.Consume(token)
+	if !ok {
+		return ptymanager.AttachGrant{}, fmt.Errorf("invalid or expired token")
+	}
+	return ptymanager.AttachGrant{Target: sandboxID}, nil
 }
 
 // Consume validates the token and, if valid, marks it used and returns the sandbox ID.

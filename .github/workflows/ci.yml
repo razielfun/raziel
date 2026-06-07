@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  test:
+    name: Test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      # build + vet cover the WHOLE repo (compile-checking the //go:build linux
+      # code costs nothing and needs no userns).
+      - run: go build ./...
+      - run: go vet ./...
+      # Tests run only the packages #81 touches. On a real Linux runner these
+      # compile AND their tests RUN — the parts a darwin dev box can only
+      # GOOS=linux build/vet-check (internal/api won't even build on darwin).
+      # The pre-existing internal/sandbox tests exec `bwrap --unshare-user`,
+      # which GitHub runners block (restricted unprivileged user namespaces), so
+      # they're left to a host where userns is available — not this CI. The live
+      # enrolled-box E2E likewise needs a provisioned host (#81 / #87).
+      - run: go test ./internal/pty/... ./internal/api/... ./internal/controlplane/...
