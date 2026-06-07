@@ -346,10 +346,19 @@ func (s *Session) broadcast(chunk []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Append to scrollback, trim if over cap
+	// Append to scrollback, trim if over cap.
 	s.scrollback = append(s.scrollback, chunk...)
 	if len(s.scrollback) > scrollbackBytes {
 		s.scrollback = s.scrollback[len(s.scrollback)-scrollbackBytes:]
+	}
+	// Scrub known secrets from the PERSISTED buffer before it can be stored or
+	// replayed to a later attach (SE-I2). Scrubbing the whole buffer (not just
+	// this chunk) catches a secret split across two PTY reads. The LIVE fan-out
+	// below stays unscrubbed — the authorized user's terminal shows real output;
+	// only the at-rest copy is redacted. Secrets are live here (zeroized only at
+	// session end), so the buffer is always scrubbed while the values exist.
+	if s.secrets != nil {
+		s.scrollback = scrubSecrets(s.scrollback, s.secrets.values())
 	}
 
 	// Fan out to all subscribers (non-blocking — drop if subscriber is slow)

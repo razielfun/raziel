@@ -1,6 +1,9 @@
 package pty
 
-import "syscall"
+import (
+	"bytes"
+	"syscall"
+)
 
 // SecretEnv carries the secrets injected into a spawned agent's environment
 // (threat-model SE-I1). Secrets live IN MEMORY ONLY — they are passed to the
@@ -40,6 +43,40 @@ func (s *SecretEnv) Zero() {
 // zeroization; unexported so it isn't part of the public surface).
 func (s *SecretEnv) backingFor(key string) []byte {
 	return s.vals[key]
+}
+
+// values returns the injected secret values, to feed the scrollback scrubber
+// (SE-I2). Returns the live backing slices — callers must only read them, and
+// after Zero() they are empty.
+func (s *SecretEnv) values() [][]byte {
+	out := make([][]byte, 0, len(s.vals))
+	for _, b := range s.vals {
+		out = append(out, b)
+	}
+	return out
+}
+
+// redactionMarker replaces a redacted secret value (mirrors lib/scrub-secrets.ts).
+var redactionMarker = []byte("[REDACTED]")
+
+// minScrubbableLen mirrors lib/scrub-secrets.ts: a 1-3 byte value appears all
+// over normal output, so redacting it would shred the stream for no gain.
+const minScrubbableLen = 4
+
+// scrubSecrets returns data with every occurrence of each secret value replaced
+// by the redaction marker (SE-I2). Values are matched literally; empty and
+// trivially short values are skipped so the scrub can't over-redact. Used on the
+// PTY scrollback before it is persisted/returned, so a secret the agent echoed
+// never leaves the box in plaintext.
+func scrubSecrets(data []byte, secrets [][]byte) []byte {
+	out := data
+	for _, sec := range secrets {
+		if len(bytes.TrimSpace(sec)) < minScrubbableLen {
+			continue
+		}
+		out = bytes.ReplaceAll(out, sec, redactionMarker)
+	}
+	return out
 }
 
 // buildSpawnEnv returns base ++ the secret KEY=VALUE entries, assembled in
