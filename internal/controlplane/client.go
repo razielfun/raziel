@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -82,22 +81,36 @@ func (c *Client) Enroll(code string) (string, error) {
 	return c.hostID, nil
 }
 
+type challengeRequest struct {
+	ComputeHostID string `json:"computeHostId"`
+}
+
+type challengeResponse struct {
+	OK        bool   `json:"ok"`
+	Challenge string `json:"challenge"`
+	Error     string `json:"error"`
+}
+
 type heartbeatRequest struct {
 	ComputeHostID string `json:"computeHostId"`
-	// Challenge is a fresh per-beat nonce the box signs; the control plane
-	// verifies Signature against the enrolled pubkey, proving key possession.
+	// Challenge is a SERVER-ISSUED, short-TTL, single-use token the box just
+	// fetched; the box signs it and the control plane re-verifies the challenge
+	// AND the Signature against the enrolled pubkey. Server-issuing the challenge
+	// (vs the box inventing one) makes a captured heartbeat un-replayable.
 	Challenge string `json:"challenge"`
 	Signature string `json:"signature"`
 }
 
-// Heartbeat sends one keypair-authenticated heartbeat: the box signs a fresh
-// challenge with its on-box private key and the control plane verifies it against
-// the enrolled public key. Requires a prior successful Enroll.
+// Heartbeat sends one keypair-authenticated heartbeat using challenge-response:
+// the box first requests a server-issued challenge, signs THAT with its on-box
+// private key, and posts it back. The control plane re-verifies the challenge
+// (live, host-bound, single-use) and the signature against the enrolled public
+// key. Requires a prior successful Enroll.
 func (c *Client) Heartbeat() error {
 	if c.hostID == "" {
 		return fmt.Errorf("controlplane: cannot heartbeat before enrollment")
 	}
-	challenge, err := c.freshChallenge()
+	challenge, err := c.requestChallenge()
 	if err != nil {
 		return err
 	}
@@ -122,14 +135,28 @@ func (c *Client) Heartbeat() error {
 	return nil
 }
 
-// freshChallenge returns the per-beat payload the box signs. It binds the host id
-// and a 128-bit random nonce so a captured heartbeat can't be replayed for a
-// different host. (A server-issued challenge is a stronger upgrade — see #80
-// HITL notes.)
-func (c *Client) freshChallenge() (string, error) {
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("controlplane: read nonce: %w", err)
+// requestChallenge fetches a fresh server-issued challenge for this box. The box
+// never invents its own challenge — that is what bounds replay to the challenge's
+// short TTL + single use.
+func (c *Client) requestChallenge() (string, error) {
+	body, err := json.Marshal(challengeRequest{ComputeHostID: c.hostID})
+	if err != nil {
+		return "", err
 	}
-	return c.hostID + ":" + base64.StdEncoding.EncodeToString(nonce), nil
+	resp, err := c.http.Post(c.baseURL+"/api/internal/heartbeat/challenge", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("controlplane: challenge request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out challengeResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if resp.StatusCode != http.StatusOK || !out.OK || out.Challenge == "" {
+		msg := out.Error
+		if msg == "" {
+			msg = resp.Status
+		}
+		return "", fmt.Errorf("controlplane: challenge rejected (%d): %s", resp.StatusCode, msg)
+	}
+	return out.Challenge, nil
 }

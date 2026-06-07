@@ -1,9 +1,11 @@
 package controlplane_test
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,11 +28,15 @@ type fakeControlPlane struct {
 	hostID      string
 	heartbeats  int
 	lastSigOK   bool
+	// issued tracks server-issued challenges and whether they've been consumed,
+	// modelling the control plane's single-use challenge store.
+	issued       map[string]bool
+	challengeNum int
 }
 
 func newFakeControlPlane(t *testing.T) *fakeControlPlane {
 	t.Helper()
-	cp := &fakeControlPlane{hostID: "host-xyz"}
+	cp := &fakeControlPlane{hostID: "host-xyz", issued: map[string]bool{}}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/internal/enroll", func(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +57,24 @@ func newFakeControlPlane(t *testing.T) *fakeControlPlane {
 		})
 	})
 
+	// Step 1: issue a fresh server-side challenge bound to the host (single-use).
+	mux.HandleFunc("/api/internal/heartbeat/challenge", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ComputeHostID string `json:"computeHostId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.ComputeHostID != cp.hostID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		cp.challengeNum++
+		ch := fmt.Sprintf("server-challenge-%d", cp.challengeNum)
+		cp.issued[ch] = false // issued, not yet consumed
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "challenge": ch})
+	})
+
+	// Step 2: verify the signed challenge — it must be one WE issued, unused, and
+	// signed by the enrolled key. Server-issued + single-use ⇒ un-replayable.
 	mux.HandleFunc("/api/internal/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ComputeHostID string `json:"computeHostId"`
@@ -58,14 +82,20 @@ func newFakeControlPlane(t *testing.T) *fakeControlPlane {
 			Signature     string `json:"signature"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		consumed, issued := cp.issued[body.Challenge]
+		if !issued || consumed { // unknown or replayed challenge
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		sig, _ := base64.StdEncoding.DecodeString(body.Signature)
-		// The control plane verifies the heartbeat against the ENROLLED pubkey.
 		cp.lastSigOK = cp.enrolledPub != nil &&
 			ed25519.Verify(cp.enrolledPub, []byte(body.Challenge), sig)
 		if !cp.lastSigOK || body.ComputeHostID != cp.hostID {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		cp.issued[body.Challenge] = true // consume (single-use)
 		cp.heartbeats++
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
@@ -88,10 +118,51 @@ func TestClient_EnrollThenHeartbeat(t *testing.T) {
 	assert.Equal(t, "host-xyz", hostID)
 	assert.Equal(t, ks.PublicKey(), cp.enrolledPub, "control plane bound OUR pubkey")
 
-	// Heartbeat: authenticate with the KEYPAIR (not the code).
+	// Heartbeat: fetch a server-issued challenge, sign it with the KEYPAIR.
 	require.NoError(t, client.Heartbeat())
 	assert.Equal(t, 1, cp.heartbeats)
 	assert.True(t, cp.lastSigOK, "heartbeat was signed by the enrolled key")
+	assert.Equal(t, 1, cp.challengeNum, "box requested a server-issued challenge")
+}
+
+func TestClient_EachHeartbeatUsesAFreshServerChallenge(t *testing.T) {
+	cp := newFakeControlPlane(t)
+	ks, err := controlplane.LoadOrCreateKeystore(t.TempDir())
+	require.NoError(t, err)
+	client := controlplane.NewClient(cp.server.URL, ks)
+	_, err = client.Enroll("CODE")
+	require.NoError(t, err)
+
+	require.NoError(t, client.Heartbeat())
+	require.NoError(t, client.Heartbeat())
+	assert.Equal(t, 2, cp.heartbeats)
+	assert.Equal(t, 2, cp.challengeNum, "each heartbeat fetched its OWN server challenge")
+}
+
+func TestClient_ReplayedHeartbeatRejected(t *testing.T) {
+	// A captured (challenge, signature) pair can't be replayed: the control plane
+	// consumes the challenge on first use, so re-posting it fails. This is the
+	// whole point of server-issued single-use challenges.
+	cp := newFakeControlPlane(t)
+	ks, err := controlplane.LoadOrCreateKeystore(t.TempDir())
+	require.NoError(t, err)
+	client := controlplane.NewClient(cp.server.URL, ks)
+	_, err = client.Enroll("CODE")
+	require.NoError(t, err)
+
+	require.NoError(t, client.Heartbeat())
+	// Replay the exact challenge the box just used, re-signed identically.
+	usedChallenge := fmt.Sprintf("server-challenge-%d", cp.challengeNum)
+	sig := base64.StdEncoding.EncodeToString(ks.Sign([]byte(usedChallenge)))
+	body, _ := json.Marshal(map[string]string{
+		"computeHostId": cp.hostID, "challenge": usedChallenge, "signature": sig,
+	})
+	resp, err := http.Post(cp.server.URL+"/api/internal/heartbeat", "application/json",
+		bytes.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "replayed challenge rejected")
+	assert.Equal(t, 1, cp.heartbeats, "replay did not count as a new heartbeat")
 }
 
 func TestClient_HeartbeatAfterRestoredHostID(t *testing.T) {
