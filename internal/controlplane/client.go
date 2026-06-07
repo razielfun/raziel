@@ -81,6 +81,52 @@ func (c *Client) Enroll(code string) (string, error) {
 	return c.hostID, nil
 }
 
+type ptyAttachVerifyRequest struct {
+	ComputeHostID string `json:"computeHostId"`
+	Token         string `json:"token"`
+}
+
+type ptyAttachVerifyResponse struct {
+	OK     bool   `json:"ok"`
+	UserID string `json:"userId"`
+	Action string `json:"action"`
+	Error  string `json:"error"`
+}
+
+// VerifyPtyAttach redeems a #79 host token against the control plane to authorize
+// a single PTY attach (#81). The box presents its OWN host id + the token it was
+// handed; the control plane re-verifies the token's audience (this box +
+// pty-attach action — P0 #2) and consumes its single-use nonce (P0 #3), and a
+// revoked host is rejected outright (D-S2). On success it returns the authorized
+// userId. A box never decides this locally — authorization is the control plane's
+// call. The transport that then carries the PTY is chosen by a seam (default =
+// inbound WS; the dial-out reverse tunnel is #86); this method is AUTHORIZATION only.
+func (c *Client) VerifyPtyAttach(token string) (string, error) {
+	if c.hostID == "" {
+		return "", fmt.Errorf("controlplane: cannot authorize a PTY attach before enrollment")
+	}
+	body, err := json.Marshal(ptyAttachVerifyRequest{ComputeHostID: c.hostID, Token: token})
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Post(c.baseURL+"/api/internal/pty-attach-verify", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("controlplane: pty-attach-verify request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out ptyAttachVerifyResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if resp.StatusCode != http.StatusOK || !out.OK {
+		msg := out.Error
+		if msg == "" {
+			msg = resp.Status
+		}
+		return "", fmt.Errorf("controlplane: pty attach refused (%d): %s", resp.StatusCode, msg)
+	}
+	return out.UserID, nil
+}
+
 type challengeRequest struct {
 	ComputeHostID string `json:"computeHostId"`
 }
