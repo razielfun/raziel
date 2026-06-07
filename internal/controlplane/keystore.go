@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -124,4 +125,42 @@ func appendSSHString(dst, s []byte) []byte {
 // key is used; the key material itself is never returned.
 func (k *Keystore) Sign(msg []byte) []byte {
 	return ed25519.Sign(k.priv, msg)
+}
+
+// ParseAuthorizedKey is the inverse of PublicKeyAuthorized: it decodes an
+// "ssh-ed25519 <base64>" line back to the raw ed25519 public key. The control
+// plane uses this to recover the enrolled pubkey for signature verification.
+func ParseAuthorizedKey(line string) (ed25519.PublicKey, error) {
+	const keyType = "ssh-ed25519"
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 || fields[0] != keyType {
+		return nil, fmt.Errorf("controlplane: not an %s authorized-keys line", keyType)
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: decode key blob: %w", err)
+	}
+	// blob = ssh-string(keyType) ++ ssh-string(pubkey).
+	name, rest, err := readSSHString(blob)
+	if err != nil || string(name) != keyType {
+		return nil, fmt.Errorf("controlplane: bad key blob header")
+	}
+	pub, _, err := readSSHString(rest)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("controlplane: bad ed25519 public key in blob")
+	}
+	return ed25519.PublicKey(pub), nil
+}
+
+// readSSHString reads one uint32-length-prefixed string off the front of b,
+// returning it and the remaining bytes.
+func readSSHString(b []byte) (s, rest []byte, err error) {
+	if len(b) < 4 {
+		return nil, nil, fmt.Errorf("controlplane: truncated ssh string length")
+	}
+	n := binary.BigEndian.Uint32(b[:4])
+	if uint32(len(b)-4) < n {
+		return nil, nil, fmt.Errorf("controlplane: truncated ssh string body")
+	}
+	return b[4 : 4+n], b[4+n:], nil
 }

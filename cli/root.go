@@ -27,6 +27,8 @@ func init() {
 	rootCmd.AddCommand(getCmd)
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(destroyCmd)
+	rootCmd.AddCommand(enrollCmd)
+	rootCmd.AddCommand(agentCmd)
 }
 
 // outputJSON prints v as formatted JSON to stdout.
