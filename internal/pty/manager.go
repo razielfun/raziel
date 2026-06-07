@@ -50,7 +50,7 @@ type Session struct {
 	cmd         *os.File // unused after start, kept for close
 	scrollback  []byte   // ring-ish: we just append and trim to cap
 	subscribers map[Subscriber]struct{}
-	exitCode    *int  // non-nil once process exits
+	exitCode    *int // non-nil once process exits
 	exitOnce    sync.Once
 	exitCh      chan struct{} // closed when process exits
 	// secrets injected into this session's agent env, held in memory only and

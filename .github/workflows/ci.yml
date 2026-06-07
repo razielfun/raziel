@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  test:
+    name: Test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      # On a real Linux runner the //go:build linux PTY subsystem (internal/pty,
+      # internal/api, stats, scrollback) compiles AND its tests run — the parts
+      # that can only be GOOS=linux build/vet-checked on a darwin dev box. This
+      # closes the verification gap short of a live enrolled-box E2E (which needs
+      # a provisioned host — see #81 / #87).
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
